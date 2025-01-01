@@ -1,7 +1,13 @@
 import marimo
 
-__generated_with = "0.10.8"
+__generated_with = "0.10.9"
 app = marimo.App(width="medium")
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""This generalizes the algorithm from [proj_cube_fit.py](proj_cub_fit.py) to general parallelotopes $P \subseteq \R^3$ (i.e. $P = A ([0,1]^3) + b$ where $A \in \R^{3,3}$ not necessarily invertible) and optimizes some aspects of the implementation. It also provides further theoretical justification for the algorithm.""")
+    return
 
 
 @app.cell
@@ -26,7 +32,9 @@ def _(NamedTuple, np):
         offset: np.ndarray
 
         def apply_to(self, points):
-            return self.linear_transf @ points + self.offset.reshape(3, 1)
+            return self.linear_transf @ points + self.offset.reshape(
+                self.linear_transf.shape[0], 1
+            )
 
         def __matmul__(self, other):
             if type(other) is AffineMap:
@@ -75,95 +83,10 @@ def _(mo):
 
 @app.cell
 def _(np):
-    def proj_onto_orthogonal_complement_single(v):
-        """
-        Similar to projon→orthogonalcomp≤mentproj_onto_orthogonal_complement special-cased to a single vector.
-
-        Note: One could also implement a special version for two vectors in R^3 or more
-        generally n-1 vectors in R^n.
-        """
-        v_unit = v / np.linalg.norm(v)
-        projection_matrix = np.outer(v_unit, v_unit)
-        return np.eye(v.shape[0]) - projection_matrix
-
-
-    def mat_from_eigenpairs(*eigenpairs: tuple[float, np.ndarray]):
-        """Computes a matrix A such that Av = tv for a given collection of pairs (t,v).
-
-        This solves systems Q^(T) a_i^(T) = Lambda Q^(T) where Q and Lambda are matrices as in the eigendecomposition and a_i is the i-th row of A.
-        """
-        eigenvals = np.array([val for (val, vec) in eigenpairs])
-        eigenvecs = np.row_stack([vec for (val, vec) in eigenpairs])
-        if eigenvecs.shape[0] != eigenvecs.shape[1]:
-            raise ValueError(
-                "Need n eigenpairs to determine matrix acting on R^n."
-            )
-        scaled = eigenvals.reshape(-1, 1) * eigenvecs
-        mat = np.row_stack(
-            [
-                np.linalg.solve(eigenvecs, scaled[:, i])
-                for i in range(scaled.shape[1])
-            ]
-        )
-        return mat
-
-
-    def proj_onto_orthogonal_complement(*vectors: np.ndarray) -> np.ndarray:
-        """
-        Returns a linear transformation that projects onto the orthogonal complement of the
-        span of a given collection of vectors \{v_i\}. The vectors are assumed to be linearly
-        independent.
-
-        So it maps all the vectors v_i to 0 and (span{v_i}_i)^\bot is invariant under the map.
-        """
-        # we'd really want to return the identity if len(vectors) == 0 but in this case we don't know the dimension
-        if len(vectors) == 1:
-            # this isn't really necessary and the below code works for a single vector but eh
-            return proj_onto_orthogonal_complement_single(vectors[0])
-        # if len(vectors) == 2: # for 3D
-        #     return mat_from_eigenpairs(
-        #         (0, vectors[0]),
-        #         (0, vectors[1]),
-        #         (1, np.cross(vectors[0], vectors[1])),
-        #     )
-        else:
-            vec_mat = np.column_stack(vectors)
-            qr_decomp = np.linalg.qr(vec_mat, mode="reduced")
-            projection_matrix = qr_decomp.Q @ qr_decomp.Q.T
-            return np.eye(vec_mat.shape[0]) - projection_matrix
-    return (
-        mat_from_eigenpairs,
-        proj_onto_orthogonal_complement,
-        proj_onto_orthogonal_complement_single,
-    )
-
-
-@app.cell
-def _(np, proj, v):
-    def orthogonal_projector(n_dims):
-        """Receives vectors via send and in turn returns the orthogonal projector onto the"""
-        projector = np.identity(
-            n_dims
-        )  # span of empty set is trivial subspace and complement is full space
-        first_vec = yield projector
-        v_unit = v / np.linalg.norm(v)
-        projector -= np.outer(v_unit, v_unit)
-        while True:
-            next_vector = yield projector
-            projected = proj @ next_vector
-            norm = np.linalg.norm(projected)
-            if np.isclose(norm, 0):
-                # new vector is linearly dependent with previous ones, no need to update
-                continue
-            else:
-                proj_unit = projected / norm
-                projector -= np.outer(proj_unit, proj_unit)
-
-
     class UpdatableOrthogonalProjection:
-        """Given vectors v_1, ..., v_i in R^n this allows to compute the projection onto the orthogonal
-        complement of W_i := span(v_1, ..., v_i); and to update this projection as additional vectors
-        v_{i+1} are added.
+        """Given vectors v_1, ..., v_i in R^n this allows to compute the projection operator onto the
+        orthogonal complement of W_i := span(v_1, ..., v_i); and to update this projection as additional
+        vectors v_{i+1} are added.
         """
 
         def __init__(self, n_dims: int):
@@ -181,7 +104,80 @@ def _(np, proj, v):
                 proj_unit = projected / norm
                 self.projector -= np.outer(proj_unit, proj_unit)
                 return self.projector
-    return UpdatableOrthogonalProjection, orthogonal_projector
+    return (UpdatableOrthogonalProjection,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(
+        r"""
+        In addition to updating the projection we might also be able to update the norm of the projections of all points. Lets look into this:
+
+        Let $u_i = \frac{P_i v_{i+1}}{\lVert P_i v_{i+1} \rVert}$ such that $P_{i+1} = P_i - u_i \otimes u_i$.
+
+        Then
+
+        \[
+        \lVert P_{i+1} x \rVert_2^2 = \lVert P_i x - u_i \otimes u_i x \rVert_2^2 = \lVert P_i x - \langle u_i, x \rangle u_i \rVert_2^2 = \lVert P_i x \rVert_2^2 - 2\langle u_i, x \rangle \langle P_i x, u_i \rangle + \lVert \langle u_i, x \rangle u_i \rVert_2^2 \\
+        = \lVert P_i x \rVert_2^2 - 2\langle u_i, x \rangle \langle P_i x, u_i \rangle + \langle u_i, x \rangle^2 = \lVert P_i x \rVert_2^2 - \langle u_i, x \rangle (2\langle P_i x, u_i \rangle - \langle u_i, x \rangle) \\
+        = \lVert P_i x \rVert_2^2 - \langle u_i, x \rangle (\langle P_i x, u_i \rangle + \langle P_i x - x, u_i \rangle)
+        \]
+
+        Since $u_i \in W_i$ and $P_i$ is the orthogonal projection onto $W_i$ we have $\langle P_i x - x, u_i \rangle = 0$ and hence
+
+        \[
+        \lVert P_{i+1} x \rVert_2^2 = \lVert P_i x \rVert_2^2 - \langle u_i, x \rangle \langle u_i, P_i x \rangle
+        \]
+
+        I don't immediately see how this would give us a cheap update: computing $\langle u_i, x \rangle$ is reasonably cheap, but to compute the other factor in the update term we need to know either $P_i^T u_i$ or $P_i x$.
+
+        This helps though: we easily see that by induction the matrices $P_i$ are symmetric. Hence $P_i^T u_i = P_i u_i$ which by idempotence of $P_i$ is just $u_i$. Hence $\langle u_i, P_i x \rangle = \langle P_i^T u_i, x \rangle = \langle u_i, x \rangle$ and we obtain the cheaply computable update
+
+        \[
+        \lVert P_{i+1} x \rVert_2^2 = \lVert P_i x \rVert_2^2 - \langle u_i, x \rangle^2.
+        \]
+        """
+    )
+    return
+
+
+@app.cell
+def _(np):
+    class UpdatableOrthogonalProjectionWithNormUpdate:
+        """Given vectors v_1, ..., v_i in R^n this allows to compute the projection operator P_i onto the
+        orthogonal complement of W_i := span(v_1, ..., v_i); and to update this projection as additional
+        vectors v_{i+1} are added. Additionally given a second collection of vectors w_1, ..., w_N this
+        also maintains the squared norms ||P_i w_j||_2^2 for all j.
+        """
+
+        def __init__(self, n_dims: int, points: np.ndarray):
+            # span of empty set is trivial subspace and complement is full space
+            self.projector = np.identity(n_dims)
+            # (yes directly computing the dot product would be better here, blame libraries that still
+            # use old numpy versions without proper dot product for me using the norm here)
+            self.projected_sq_norms = np.linalg.norm(points, axis=0) ** 2
+            self.points = points
+
+        def add_vector_to_generators(self, new_vec: np.ndarray) -> np.ndarray:
+            """This adds a vector to the spanning set i.e. updates from W_i to W_{i+1}."""
+            projected = self.projector @ new_vec
+            norm = np.linalg.norm(projected)
+
+            if np.isclose(norm, 0):
+                # new vector is linearly dependent with previous ones, no need to update
+                new_proj = self.projector
+                # norms don't change either
+            else:
+                proj_unit = projected / norm
+                self.projector -= np.outer(proj_unit, proj_unit)
+                new_proj = self.projector
+
+                # update norms (if more precision is needed use a compensated sum here)
+                self.projected_sq_norms -= (
+                    np.einsum("i,ij", proj_unit, self.points) ** 2
+                )
+            return new_proj
+    return (UpdatableOrthogonalProjectionWithNormUpdate,)
 
 
 @app.cell(hide_code=True)
@@ -191,7 +187,12 @@ def _(mo):
 
 
 @app.cell
-def _(AffineMap, NamedTuple, np, proj_onto_orthogonal_complement):
+def _(
+    AffineMap,
+    NamedTuple,
+    UpdatableOrthogonalProjectionWithNormUpdate,
+    np,
+):
     class CubeFit(NamedTuple):
         # remaps the parallelotope in R^d such that d of its diagonals are orthonormal post-transformation (and the center is at the origin).
         diagonal_orthonormalizer: AffineMap
@@ -228,12 +229,23 @@ def _(AffineMap, NamedTuple, np, proj_onto_orthogonal_complement):
         norms_1 = np.linalg.norm(centered_points, axis=0)
         diag_1 = centered_points[:, np.argmax(norms_1)]
         diags = [diag_1]  # could preallocate for dim_space vectors here
+        _proj = UpdatableOrthogonalProjectionWithNormUpdate(
+            dim_space, centered_points
+        )
         # we want to / are able to determine n diagonals in total, but we already know one
         for _ in range(dim_space - 1):
-            ortho_projector = proj_onto_orthogonal_complement(*diags)
+            ortho_projector = _proj.add_vector_to_generators(diags[-1])
+            _max_idx = np.argmax(_proj.projected_sq_norms)
+            """ the previous line is equivalent to these ones
             projected_points = ortho_projector @ centered_points
             norms = np.linalg.norm(projected_points, axis=0)
-            new_diag = centered_points[:, np.argmax(norms)]
+            _max_idx = np.argmax(norms)
+            """
+            # if we're looking for parallelotopes  P = A [0,1]^n + b with A singular, we want to check
+            # whether the maximum of the projected norms is (close to) zero and if it is break out of
+            # the loop: at that point we've determined all diagonals of the parallelotope and can construct the desired map
+            # however we'll for now assume A to be invertible and continue:
+            new_diag = centered_points[:, _max_idx]
             diags.append(new_diag)
 
         diags_mat = np.column_stack(diags)
@@ -241,56 +253,21 @@ def _(AffineMap, NamedTuple, np, proj_onto_orthogonal_complement):
         # and moreover maps the i-th diagonal to the i-th standard unit vector
         estimated_transformation_mat = np.linalg.inv(diags_mat)
         diagonal_orthonormalizer = AffineMap(estimated_transformation_mat, -center)
-        # the 2D case would really be done at this point (since we can just pick one diagonal point
-        # and we know that it's connected to both points of the other diagonal by an edge; in
-        # constrast to the 3D case)
-        # and the >3 dimensional one needs a bit more thinking:
-        # We can probably again pick the point of maximal norm in the transformed space as next
-        # diagonal and then construct connected vertices similar to 3D case. But I haven't thought it out properly and I'm not sure whether that indeed uniquely determines the parallelotope
 
+        # we may freely assume which diagonals of the unit cube "we have" modulo their signs
+        # note that if we replace any such diagonal by its reflection (i.e. we get "the wrong sign")
+        # it results in a reflection of the resulting point as well --- which again doesn't matter.
         transformed_points = estimated_transformation_mat @ centered_points
-        positive_first = transformed_points[0, :] > 0
-        positive_second = transformed_points[1, positive_first] > 0
-        positive_third = transformed_points[2, positive_first] > 0
-
-        p = transformed_points[:, positive_first]
-        transformed_diag_4 = p[:, np.argmax(np.linalg.norm(p, axis=0))]
-        # for topological reasons the new vertex must connect to exactly these other vertices
-        _sgn_d4 = np.sign(transformed_diag_4)
+        transformed_norms = np.linalg.norm(transformed_points, axis=0)
+        transformed_diag_4 = transformed_points[:, np.argmax(transformed_norms)]
+        # for topological reasons the new vertex must connect to exactly these other vertices:
+        sgn_d4 = np.sign(transformed_diag_4)
         transformed_diagonals = [
-            np.array([1, 0, 0]),
-            np.array([0, _sgn_d4[1], 0]),
-            np.array([0, 0, _sgn_d4[2]]),
+            np.array([sgn_d4[0], 0, 0]),
+            np.array([0, sgn_d4[1], 0]),
+            np.array([0, 0, sgn_d4[2]]),
             transformed_diag_4,
         ]
-        """
-        # black magic or something like that
-        # this just computes 2D dot products of various subsets of the data projected down onto a 2D plane. It ignores "negative contributions"
-        # assuming enough sampling the negative ones shouldn't matter but I'm not quite sure how it works out if there's not *that* many points to begin with
-
-        p = transformed_points[1:, positive_first]
-        options = [[1, 1], [1, -1], [-1, 1], [-1, -1]]
-        p2 = p[0, positive_second].sum()
-        p3 = p[1, positive_third].sum()
-        n2 = p[0, ~positive_second].sum()
-        n3 = p[1, ~positive_third].sum()
-        scores = [
-            p2 + p3,
-            p2 - n3,
-            -n2 + p3,
-            -n2 - n3,
-        ]
-        best_option = options[np.argmax(scores)]
-        # determine point from cloud that's closest to the vertex we found
-        transformed_diag_4 = np.array([1, *best_option])
-
-        # for topological reasons the new vertex must connect to exactly these other vertices
-        transformed_diagonals = [
-            np.array([1, 0, 0]),
-            np.array([0, best_option[0], 0]),
-            np.array([0, 0, best_option[1]]),
-            transformed_diag_4,
-        ]"""
         # construct "cubification" map
         transformed_edge_vectors = [
             d - transformed_diag_4 for d in transformed_diagonals[:3]
@@ -300,9 +277,51 @@ def _(AffineMap, NamedTuple, np, proj_onto_orthogonal_complement):
 
         cubifier = AffineMap(
             fitted_transformation_mat, -edge_cubifier @ transformed_diag_4
-        ).after(AffineMap(np.eye(dim_space), -center))
+        ).after(AffineMap(np.identity(dim_space), -center))
         return CubeFit(diagonal_orthonormalizer, cubifier)
     return CubeFit, proj_cube_fit
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(
+        r"""
+        Call a set $P \subseteq \R^n$ a centered polytope if its the image of $[-1,1]^n$ under a linear map $A$.
+        Call the images of the vertices of $[-1,1]^n$ under $A$ the diagonals of $P$ and note that linear maps preserve diagonals.
+
+        ### Theorem
+        Let $d_1, ..., d_3$ be linearly independent diagonals of $P = [-1,1]^3$. Moreover let $T$ be the linear map such that $T d_i = e_i$ for all $i=1,...,3$; i.e. $T = D^{-1}$ where $D = (d_1, ..., d_3)$.
+        Then $TP$ has one vertex of the form $(s_1, ..., s_3)$ with all the $s_i \in \{+1, -1\}$ i.e. $TP$ shares a vertex with $[-1,1]^3$.
+
+        **Proof**
+
+        It suffices to check that for any choice of $d_1, ..., d_3$ there is some vector $x$ with all entries in $\{\pm 1\}$ such that $Ds$ also has all entries in $\{\pm 1\}$ (since in that case $s := D^{-1} x$ has the desired property). There are (up to a sign, which doesn't matter here) only four diagonals and one easily checks by exhausting all possibilities that indeed $s=d_4$ and $s=-d_4$ work, where $d_4$ is precisely the "leftover" diagonal of $[-1,1]^3$ that's not among the $d_1,...,d_3$. Explicitly we have:
+
+        \[
+        \begin{pmatrix} 1 & 1 & 1 \\ 1 & 1 & -1 \\ 1 & -1 & 1  \end{pmatrix} \begin{pmatrix} 1 \\ -1 \\ -1 \end{pmatrix} = -\begin{pmatrix} 1 \\ -1 \\ -1 \end{pmatrix}
+        \]
+
+        \[
+        \begin{pmatrix} 1 & 1 & 1 \\ 1 & 1 & -1 \\ 1 & -1 & -1  \end{pmatrix} \begin{pmatrix} 1 \\ -1 \\ 1 \end{pmatrix} = -\begin{pmatrix} 1 \\ -1 \\ 1 \end{pmatrix}
+        \]
+
+        \[
+        \begin{pmatrix} 1 & 1 & 1 \\ 1 & -1 & 1 \\ 1 & -1 & -1  \end{pmatrix} \begin{pmatrix} 1 \\ 1 \\ -1 \end{pmatrix} = \begin{pmatrix} 1 \\ -1 \\ 1 \end{pmatrix}
+        \]
+
+        \[
+        \begin{pmatrix} 1 & 1 & -1 \\ 1 & -1 & 1 \\ 1 & -1 & -1  \end{pmatrix} \begin{pmatrix} 1 \\ 1 \\ 1 \end{pmatrix} = \begin{pmatrix} 1 \\ 1 \\ -1 \end{pmatrix}
+        \]
+
+        **Remark**
+
+        This theorem essentially shows why the step that determines the final vertex from the three previously determined diagonals works. Note that the analogous theorem isn't generally true in other dimensions: in 2 dimensions it's obviously false and using a CAS we also quickly find it to be wrong in 4 dimensions. In 5 dimensions we find that there's zero, one or two vectors (modulo reflection) satisfying the claim.
+        This suggests that some solutions may exist in odd dimensions while there are none in odd dimensions.
+
+        Finally note how we can compute the "unused diagonal" as the pointwise product of the used ones.
+        """
+    )
+    return
 
 
 @app.cell(hide_code=True)
@@ -762,6 +781,18 @@ def _(njit, np):
         proj_boundary_unit_cube,
         proj_unit_cube,
     )
+
+
+@app.cell(disabled=True)
+def _(estimated_map2, make_objective_val_and_grad, np, points, scp):
+    _og = make_objective_val_and_grad(estimated_map2.apply_to(points), 10)
+    _obj = lambda x, *args: _og(x.reshape(3, 3))[0]
+    _obj_grad = lambda x, *args: _og(x.reshape(3, 3))[1].flatten()
+
+    _mat = scp.optimize.minimize(
+        _obj, np.identity(3).flatten(), jac=_obj_grad, method="CG"
+    ).x.reshape(3, 3)
+    return
 
 
 @app.cell
